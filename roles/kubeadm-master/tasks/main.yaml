@@ -1,0 +1,79 @@
+- name: Check for existing kubelet configuration
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: kubeadm token generate
+  command: kubeadm token generate
+  register: token1
+  when: kubelet_conf.stat.exists == False
+
+- name: kubeadm get existing token
+  command: sh -c "kubeadm token list | awk '/The default bootstrap token/ { print $1; }'"
+  register: token2
+  when: kubelet_conf.stat.exists == True
+
+# https://github.com/ansible/ansible/issues/4297
+- name: token
+  set_fact:
+    token: "{{ token1 if kubelet_conf.stat.exists == False else token2 }}"
+
+- name: kubeadm init
+  command: "kubeadm init --skip-preflight-checks --token {{ token.stdout }} --kubernetes-version v1.10.0 --apiserver-advertise-address {{ hostvars[groups.master[0]].ansible_ssh_host }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+
+- name: Configure kube-controller-manager cloud provider integration
+  copy:
+    dest: /etc/kubernetes/manifests/kube-controller-manager.yaml
+    src: files/kube-controller-manager.yaml
+
+- name: Upload webook kubeconfig file
+  copy:
+    dest: /etc/kubernetes/pki/webhook.kubeconfig.yaml
+    src: files/webhook.kubeconfig.yaml
+
+- name: Upload webook kubeconfig file
+  template:
+    dest: /etc/kubernetes/manifests/k8s-keystone-auth.yaml
+    src: files/k8s-keystone-auth.yaml.j2
+
+- name: Configure keystone integration
+  blockinfile:
+    insertbefore: 'image: '
+    block: "    - --authentication-token-webhook-config-file=/etc/kubernetes/pki/webhook.kubeconfig.yaml"
+    path: /etc/kubernetes/manifests/kube-apiserver.yaml
+
+- name: Ensure kubectl configuration directory is present
+  become: True
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: 0700
+
+- name: Copy kubectl configuration for the default user
+  become: True
+  copy:
+    remote_src: True
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    owner: ubuntu
+    group: ubuntu
+    mode: 0600
+
+- name: Check for existing kubectl bash completion
+  stat:
+    path: /etc/bash_completion.d/kubectl
+  register: kubectl_bash_completion
+
+- name: Ensure kubectl bash_completion is present
+  become: True
+  shell: kubectl completion bash > /etc/bash_completion.d/kubectl
+  when: kubectl_bash_completion.stat.exists == False
+
+- name: Fetch CA cert
+  fetch:
+    src: /etc/kubernetes/pki/ca.crt
+    dest: /tmp/
